@@ -1,4 +1,4 @@
-name: OpenGeni CUA Windows WPF acceptance
+name: OpenGeni CUA Windows live preview experiment
 
 on:
   push:
@@ -13,16 +13,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  candidate:
-    name: Frozen public CUA screenshot and input on Windows
+  preview:
+    name: Live preview contract (${{ matrix.name }})
     runs-on: windows-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: candidate
+            source: 544dbac2f30cc02cbd755a03774c4420fd5c9259
+            expected: pass
+          - name: unchanged-upstream
+            source: 9545a3d17b44b587b593d59090dc140740876a6e
+            expected: stale-handle
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
-      CUA_DRIVER_SOURCE_SHA: "544dbac2f30cc02cbd755a03774c4420fd5c9259"
+      CUA_DRIVER_SOURCE_SHA: ${{ matrix.source }}
     defaults:
       run:
         shell: pwsh
@@ -30,35 +40,54 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: 544dbac2f30cc02cbd755a03774c4420fd5c9259
+          ref: ${{ matrix.source }}
           persist-credentials: false
-      - name: Verify immutable source and runner session
-        id: session
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          path: opengeni-validation
+          sparse-checkout: validation
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+      - name: Verify source and overlay the isolated experiment
+        env:
+          SOURCE_SHA: ${{ matrix.source }}
         run: |
           $actual = (git rev-parse HEAD).Trim()
-          if ($actual -ne "544dbac2f30cc02cbd755a03774c4420fd5c9259") { throw "Unexpected source revision" }
+          if ($actual -ne $env:SOURCE_SHA) { throw "Unexpected source revision" }
           $sessionId = (Get-Process -Id $PID).SessionId
-          "session_id=$sessionId" >> $env:GITHUB_OUTPUT
-          "Source: $actual; Windows session: $sessionId"
-      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
-      - name: Require interactive desktop and prepare trajectory capture
-        run: |
-          if ((Get-Process -Id $PID).SessionId -eq 0) { throw "WPF acceptance requires an interactive desktop" }
+          if ($sessionId -eq 0) { throw "Requires interactive desktop" }
           & "$env:GITHUB_WORKSPACE\scripts\ci\windows\verify-user-session.ps1"
           & "$env:GITHUB_WORKSPACE\scripts\ci\windows\setup-ffmpeg.ps1"
-          dotnet --info
-          if ($LASTEXITCODE -ne 0) { throw "Missing .NET fixture toolchain" }
-      - name: Build frozen driver and required WPF fixture
+          $overlay = "$env:GITHUB_WORKSPACE\opengeni-validation\validation\windows-wpf-preview.rs"
+          Copy-Item $overlay "crates\cua-driver-e2e\tests\opengeni_wpf_preview.rs"
+          git diff --exit-code -- .
+          if ($LASTEXITCODE -ne 0) { throw "Experiment changed tracked source" }
+          $changes = @(git ls-files --others --exclude-standard -- .)
+          if ($changes.Count -ne 1 -or $changes[0] -ne "crates/cua-driver-e2e/tests/opengeni_wpf_preview.rs") {
+            throw "Experiment modified more than its separate test target: $changes"
+          }
+          $artifacts = Join-Path $env:RUNNER_TEMP "cua-live-preview"
+          New-Item -ItemType Directory -Force $artifacts | Out-Null
+          @{
+            sourceSha = $actual
+            validationSha = $env:GITHUB_SHA
+            testSha256 = (Get-FileHash $overlay -Algorithm SHA256).Hash
+            windowsSession = $sessionId
+          } | ConvertTo-Json | Set-Content (Join-Path $artifacts "source-proof.json")
+          "Source: $actual; Windows session: $sessionId; only the separate test target overlaid"
+      - name: Build source driver and required WPF fixture
         run: |
-          $env:CUA_DRIVER_SOURCE_SHA = "544dbac2f30cc02cbd755a03774c4420fd5c9259"
           cargo build -p cua-driver --bin cua-driver --locked
           if ($LASTEXITCODE -ne 0) { throw "Source-built driver failed" }
-          cargo test -p cua-driver-e2e --test harness_wpf_test --no-run --locked
-          if ($LASTEXITCODE -ne 0) { throw "WPF suite failed to compile" }
+          cargo test -p cua-driver-e2e --test opengeni_wpf_preview --no-run --locked
+          if ($LASTEXITCODE -ne 0) { throw "Preview experiment failed to compile" }
           & "$env:GITHUB_WORKSPACE\libs\cua-driver\tests\fixtures\build\windows.ps1" -Targets wpf
           if ($LASTEXITCODE -ne 0) { throw "WPF fixture failed to build" }
           if (-not (Test-Path "test-apps\harness-wpf\CuaTestHarness.Wpf.exe")) { throw "Required WPF fixture absent" }
-      - name: Run real WPF observation screenshot and keyboard cases
+      - name: Observe real preview and input result
+        env:
+          EXPECTED_BEHAVIOR: ${{ matrix.expected }}
         run: |
           $env:CUA_TEST_DRIVER_BIN = Join-Path (Get-Location) "target\debug\cua-driver.exe"
           $env:CUA_TEST_WORKSPACE_ROOT = (Get-Location).Path
@@ -68,37 +97,32 @@ jobs:
           $env:CUA_TEST_DRIVER_STDERR = "1"
           $env:CUA_E2E_FORBID_SKIPS = "1"
           $env:CUA_E2E_UNRESTRICTED_GUI = "1"
-          $env:CUA_E2E_SOURCE_SHA = "544dbac2f30cc02cbd755a03774c4420fd5c9259"
-          $artifacts = Join-Path $env:RUNNER_TEMP "cua-wpf-acceptance"
-          New-Item -ItemType Directory -Force $artifacts | Out-Null
-          $env:CUA_E2E_RESULTS_FILE = Join-Path $artifacts "results.jsonl"
-          $env:CUA_E2E_RECORDINGS_ROOT = Join-Path $artifacts "recordings"
-          $tests = @(
-            "harness_wpf_smoke",
-            "harness_wpf_query_projects_structured_elements",
-            "harness_wpf_stale_element_token_fails_closed",
-            "harness_wpf_layered_popup_capture",
-            "harness_wpf_type_text"
-          )
-          $failures = @()
-          foreach ($test in $tests) {
-            $savedPreference = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            try {
-              $output = @(& cargo test -p cua-driver-e2e --test harness_wpf_test $test --locked -- --ignored --exact --nocapture --test-threads=1 2>&1)
-              $exitCode = $LASTEXITCODE
-            } finally {
-              $ErrorActionPreference = $savedPreference
-            }
-            $output | Tee-Object -FilePath (Join-Path $artifacts "$test.log")
-            if ($exitCode -ne 0 -or -not ($output -match 'test result: ok\. 1 passed')) { $failures += $test }
+          $env:CUA_PREVIEW_ARTIFACTS = Join-Path $env:RUNNER_TEMP "cua-live-preview"
+          $env:CUA_E2E_RECORDINGS_ROOT = Join-Path $env:CUA_PREVIEW_ARTIFACTS "recordings"
+          $savedPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          try {
+            $output = @(& cargo test -p cua-driver-e2e --test opengeni_wpf_preview --locked -- --ignored --nocapture --test-threads=1 2>&1)
+            $exitCode = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $savedPreference
           }
-          if ($failures.Count -ne 0) { throw "WPF cases failed: $($failures -join ', ')" }
+          $output | Tee-Object -FilePath (Join-Path $env:CUA_PREVIEW_ARTIFACTS "experiment.log")
+          if ($env:EXPECTED_BEHAVIOR -eq "pass") {
+            if ($exitCode -ne 0 -or -not ($output -match 'test result: ok\. 1 passed') -or -not ($output -match 'preview_keeper_passed:')) {
+              throw "Candidate did not preserve controls during real previews"
+            }
+          } else {
+            if ($exitCode -eq 0 -or -not ($output -match 'preview_semantic_click_failed: code=stale_element_token') -or -not ($output -match 'test result: FAILED\. 0 passed; 1 failed')) {
+              throw "Upstream did not reproduce the exact stale-handle defect"
+            }
+            "Baseline reproduces stale_element_token after five real previews; expected failure, not a passing driver test."
+          }
       - name: Retain public fixture evidence
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
-          name: frozen-cua-wpf-544dbac
-          path: ${{ runner.temp }}/cua-wpf-acceptance
-          if-no-files-found: warn
+          name: frozen-cua-live-preview-${{ matrix.name }}
+          path: ${{ runner.temp }}/cua-live-preview
+          if-no-files-found: error
           retention-days: 7
