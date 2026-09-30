@@ -1,4 +1,4 @@
-name: OpenGeni CUA Windows live preview experiment
+name: OpenGeni CUA Windows baseline reproduction
 
 on:
   push:
@@ -21,9 +21,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: candidate
-            source: 544dbac2f30cc02cbd755a03774c4420fd5c9259
-            expected: pass
+          # Candidate GUI proof is retained in run36787879690. Only the
+          # baseline reporter changed; do not repeat its unaffected counterpart.
           - name: unchanged-upstream
             source: 9545a3d17b44b587b593d59090dc140740876a6e
             expected: stale-handle
@@ -118,6 +117,9 @@ jobs:
             }
             "Baseline reproduces stale_element_token after five real previews; expected failure, not a passing driver test."
           }
+          # Actions appends an exit using LASTEXITCODE. The expected baseline
+          # cargo failure is already checked above; it must not fail the reporter.
+          exit 0
       - name: Retain public fixture evidence
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
