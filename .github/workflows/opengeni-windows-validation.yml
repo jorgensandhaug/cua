@@ -1,0 +1,65 @@
+name: OpenGeni CUA Windows candidate validation
+
+on:
+  push:
+    branches: [validation/cua-windows-544dbac-20260930]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opengeni-cua-windows-544dbac
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    name: Frozen public CUA source on Windows
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: libs/cua-driver/rust
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 544dbac2f30cc02cbd755a03774c4420fd5c9259
+          persist-credentials: false
+      - name: Verify immutable source and runner session
+        id: session
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne "544dbac2f30cc02cbd755a03774c4420fd5c9259") { throw "Unexpected source revision" }
+          $sessionId = (Get-Process -Id $PID).SessionId
+          "session_id=$sessionId" >> $env:GITHUB_OUTPUT
+          "Source: $actual; Windows session: $sessionId"
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+      - name: Compile Windows driver and SDK targets
+        run: cargo test -p cua-driver -p cua-driver-core -p cua-driver-sdk -p cua-driver-testkit -p cursor-overlay -p platform-windows -p cua-driver-uia --all-targets --no-run --locked
+      - name: Core snapshot, authorization and shutdown tests
+        run: cargo test -p cua-driver-core --lib --test recording_shutdown_errors --locked
+      - name: Windows platform units and disposable clipboard
+        env:
+          CUA_TEST_ALLOW_CLIPBOARD: "1"
+        run: cargo test -p platform-windows --lib --locked
+      - name: SDK ABI and remote authorization
+        run: |
+          cargo test -p cua-driver-sdk abi::tests:: --lib --locked
+          if ($LASTEXITCODE -ne 0) { throw "SDK ABI test failed" }
+          cargo test -p cua-driver-sdk remote_ --lib --locked
+          if ($LASTEXITCODE -ne 0) { throw "SDK remote test failed" }
+      - name: Full SDK units on interactive runner
+        if: steps.session.outputs.session_id != '0'
+        run: cargo test -p cua-driver-sdk --lib --locked -- --test-threads=1
+      - name: Verify Session 0 refusal on service runner
+        if: steps.session.outputs.session_id == '0'
+        run: |
+          cargo test -p cua-driver-sdk session_zero_refuses_runtime_creation_before_platform_dispatch --lib --locked | Tee-Object -Variable result
+          if ($LASTEXITCODE -ne 0) { throw "Session 0 refusal failed" }
+          if (-not ($result -match 'test result: ok\. 1 passed')) { throw "Session 0 test was not executed" }
