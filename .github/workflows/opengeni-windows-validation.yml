@@ -1,4 +1,4 @@
-name: OpenGeni CUA Windows baseline reproduction
+name: OpenGeni controller with native CUA on Windows
 
 on:
   push:
@@ -13,25 +13,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  preview:
-    name: Live preview contract (${{ matrix.name }})
+  controller:
+    name: Frozen OpenGeni controller and repaired CUA
     runs-on: windows-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Candidate GUI proof is retained in run36787879690. Only the
-          # baseline reporter changed; do not repeat its unaffected counterpart.
-          - name: unchanged-upstream
-            source: 9545a3d17b44b587b593d59090dc140740876a6e
-            expected: stale-handle
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
-      CUA_DRIVER_SOURCE_SHA: ${{ matrix.source }}
+      CUA_DRIVER_SOURCE_SHA: 544dbac2f30cc02cbd755a03774c4420fd5c9259
+      OPENGENI_SOURCE_SHA: e789c63712ec3f5554c5fa865cf98143e26f2cef
+      CUA_DRIVER_RS_TELEMETRY_ENABLED: "false"
     defaults:
       run:
         shell: pwsh
@@ -39,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ matrix.source }}
+          ref: 544dbac2f30cc02cbd755a03774c4420fd5c9259
           persist-credentials: false
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -47,84 +40,84 @@ jobs:
           path: opengeni-validation
           sparse-checkout: validation
           persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: Cloudgeni-ai/opengeni
+          ref: e789c63712ec3f5554c5fa865cf98143e26f2cef
+          path: opengeni
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.0
       - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
-      - name: Verify source and overlay the isolated experiment
-        env:
-          SOURCE_SHA: ${{ matrix.source }}
+        with:
+          toolchain: 1.97.1
+      - name: Verify frozen public sources and isolated desktop
         run: |
           $actual = (git rev-parse HEAD).Trim()
-          if ($actual -ne $env:SOURCE_SHA) { throw "Unexpected source revision" }
+          if ($actual -ne $env:CUA_DRIVER_SOURCE_SHA) { throw "Unexpected CUA source revision" }
+          $opengeniRoot = Join-Path $env:GITHUB_WORKSPACE "opengeni"
+          $opengeniSha = (git -C $opengeniRoot rev-parse HEAD).Trim()
+          if ($opengeniSha -ne $env:OPENGENI_SOURCE_SHA) { throw "Unexpected OpenGeni source revision" }
           $sessionId = (Get-Process -Id $PID).SessionId
           if ($sessionId -eq 0) { throw "Requires interactive desktop" }
           & "$env:GITHUB_WORKSPACE\scripts\ci\windows\verify-user-session.ps1"
-          & "$env:GITHUB_WORKSPACE\scripts\ci\windows\setup-ffmpeg.ps1"
-          $overlay = "$env:GITHUB_WORKSPACE\opengeni-validation\validation\windows-wpf-preview.rs"
-          Copy-Item $overlay "crates\cua-driver-e2e\tests\opengeni_wpf_preview.rs"
+          $overlay = "$env:GITHUB_WORKSPACE\opengeni-validation\validation\windows-opengeni-controller.ts"
+          Copy-Item $overlay "$opengeniRoot\packages\browserd\test\og-windows-cua-probe.ts"
           git diff --exit-code -- .
           if ($LASTEXITCODE -ne 0) { throw "Experiment changed tracked source" }
-          $changes = @(git ls-files --others --exclude-standard -- .)
-          if ($changes.Count -ne 1 -or $changes[0] -ne "crates/cua-driver-e2e/tests/opengeni_wpf_preview.rs") {
-            throw "Experiment modified more than its separate test target: $changes"
+          git -C $opengeniRoot diff --exit-code -- .
+          if ($LASTEXITCODE -ne 0) { throw "Experiment changed tracked OpenGeni source" }
+          $changes = @(git -C $opengeniRoot ls-files --others --exclude-standard -- .)
+          if ($changes.Count -ne 1 -or $changes[0] -ne "packages/browserd/test/og-windows-cua-probe.ts") {
+            throw "Unexpected experiment source: $changes"
           }
-          $artifacts = Join-Path $env:RUNNER_TEMP "cua-live-preview"
+          $artifacts = Join-Path $env:RUNNER_TEMP "opengeni-cua-controller"
           New-Item -ItemType Directory -Force $artifacts | Out-Null
           @{
             sourceSha = $actual
+            opengeniSha = $opengeniSha
             validationSha = $env:GITHUB_SHA
             testSha256 = (Get-FileHash $overlay -Algorithm SHA256).Hash
             windowsSession = $sessionId
+            transport = "native MCP envelope projected through test-only DesktopRuntime"
+            productionWindowsEnabled = $false
+            packagedWindowsSdkAccepted = $false
           } | ConvertTo-Json | Set-Content (Join-Path $artifacts "source-proof.json")
-          "Source: $actual; Windows session: $sessionId; only the separate test target overlaid"
+          "CUA: $actual; OpenGeni: $opengeniSha; Windows session: $sessionId"
       - name: Build source driver and required WPF fixture
         run: |
           cargo build -p cua-driver --bin cua-driver --locked
           if ($LASTEXITCODE -ne 0) { throw "Source-built driver failed" }
-          cargo test -p cua-driver-e2e --test opengeni_wpf_preview --no-run --locked
-          if ($LASTEXITCODE -ne 0) { throw "Preview experiment failed to compile" }
           & "$env:GITHUB_WORKSPACE\libs\cua-driver\tests\fixtures\build\windows.ps1" -Targets wpf
           if ($LASTEXITCODE -ne 0) { throw "WPF fixture failed to build" }
           if (-not (Test-Path "test-apps\harness-wpf\CuaTestHarness.Wpf.exe")) { throw "Required WPF fixture absent" }
-      - name: Observe real preview and input result
-        env:
-          EXPECTED_BEHAVIOR: ${{ matrix.expected }}
+          $binary = Join-Path (Get-Location) "target\debug\cua-driver.exe"
+          (Get-FileHash $binary -Algorithm SHA256).Hash | Set-Content (Join-Path $env:RUNNER_TEMP "opengeni-cua-controller\driver-sha256.txt")
+      - name: Install exact OpenGeni dependencies
+        working-directory: opengeni
         run: |
-          $env:CUA_TEST_DRIVER_BIN = Join-Path (Get-Location) "target\debug\cua-driver.exe"
-          $env:CUA_TEST_WORKSPACE_ROOT = (Get-Location).Path
-          $env:CUA_TEST_APPS_ROOT = Join-Path (Get-Location) "test-apps"
-          $env:CUA_TEST_REQUIRE_DRIVER_BIN = "1"
-          $env:CUA_TEST_REQUIRE_FIXTURES = "1"
-          $env:CUA_TEST_DRIVER_STDERR = "1"
-          $env:CUA_E2E_FORBID_SKIPS = "1"
-          $env:CUA_E2E_UNRESTRICTED_GUI = "1"
-          $env:CUA_PREVIEW_ARTIFACTS = Join-Path $env:RUNNER_TEMP "cua-live-preview"
-          $env:CUA_E2E_RECORDINGS_ROOT = Join-Path $env:CUA_PREVIEW_ARTIFACTS "recordings"
-          $savedPreference = $ErrorActionPreference
-          $ErrorActionPreference = "Continue"
-          try {
-            $output = @(& cargo test -p cua-driver-e2e --test opengeni_wpf_preview --locked -- --ignored --nocapture --test-threads=1 2>&1)
-            $exitCode = $LASTEXITCODE
-          } finally {
-            $ErrorActionPreference = $savedPreference
-          }
-          $output | Tee-Object -FilePath (Join-Path $env:CUA_PREVIEW_ARTIFACTS "experiment.log")
-          if ($env:EXPECTED_BEHAVIOR -eq "pass") {
-            if ($exitCode -ne 0 -or -not ($output -match 'test result: ok\. 1 passed') -or -not ($output -match 'preview_keeper_passed:')) {
-              throw "Candidate did not preserve controls during real previews"
-            }
-          } else {
-            if ($exitCode -eq 0 -or -not ($output -match 'preview_semantic_click_failed: code=stale_element_token') -or -not ($output -match 'test result: FAILED\. 0 passed; 1 failed')) {
-              throw "Upstream did not reproduce the exact stale-handle defect"
-            }
-            "Baseline reproduces stale_element_token after five real previews; expected failure, not a passing driver test."
-          }
-          # Actions appends an exit using LASTEXITCODE. The expected baseline
-          # cargo failure is already checked above; it must not fail the reporter.
-          exit 0
+          bun install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw "Frozen OpenGeni dependencies failed" }
+          git diff --exit-code -- .
+          if ($LASTEXITCODE -ne 0) { throw "Install modified frozen OpenGeni source" }
+      - name: Exercise actual controller receipts and live previews
+        run: |
+          $env:OG_CUA_DRIVER = Join-Path (Get-Location) "target\debug\cua-driver.exe"
+          $env:OG_CUA_FIXTURE = Join-Path (Get-Location) "test-apps\harness-wpf\CuaTestHarness.Wpf.exe"
+          $env:OG_CUA_EVIDENCE = Join-Path $env:RUNNER_TEMP "opengeni-cua-controller"
+          $probe = Join-Path $env:GITHUB_WORKSPACE "opengeni\packages\browserd\test\og-windows-cua-probe.ts"
+          bun --no-env-file $probe 2>&1 | Tee-Object -FilePath (Join-Path $env:OG_CUA_EVIDENCE "experiment.log")
+          if ($LASTEXITCODE -ne 0) { throw "Real OpenGeni Windows controller experiment failed" }
+          git diff --exit-code -- .
+          if ($LASTEXITCODE -ne 0) { throw "Experiment changed native source" }
+          git -C "$env:GITHUB_WORKSPACE\opengeni" diff --exit-code -- .
+          if ($LASTEXITCODE -ne 0) { throw "Experiment changed OpenGeni source" }
       - name: Retain public fixture evidence
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
-          name: frozen-cua-live-preview-${{ matrix.name }}
-          path: ${{ runner.temp }}/cua-live-preview
+          name: frozen-opengeni-cua-windows-controller
+          path: ${{ runner.temp }}/opengeni-cua-controller
           if-no-files-found: error
           retention-days: 7
