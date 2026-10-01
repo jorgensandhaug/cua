@@ -21,7 +21,6 @@ jobs:
     env:
       CUA_E2E_SOURCE_SHA: ${{ github.sha }}
       CUA_E2E_WORKFLOW_SHA: ${{ github.sha }}
-      CUA_MACOS_HOSTED_PROBE_DIR: ${{ runner.temp }}/cua-macos-hosted-probe
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -37,6 +36,8 @@ jobs:
           git diff --exit-code 544dbac2f30cc02cbd755a03774c4420fd5c9259 HEAD -- . \
             ':!.github/workflows/opengeni-windows-validation.yml'
       - name: Run unchanged hosted environment probe
+        env:
+          CUA_MACOS_HOSTED_PROBE_DIR: ${{ runner.temp }}/cua-macos-hosted-probe
         shell: bash
         run: scripts/ci/macos/probe-hosted-runner.sh
       - name: Retain synthetic environment evidence
