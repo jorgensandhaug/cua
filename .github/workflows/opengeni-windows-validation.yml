@@ -1,123 +1,31 @@
-name: OpenGeni controller with native CUA on Windows
+name: OpenGeni frozen CUA canonical desktop matrices
 
 on:
   push:
-    branches: [validation/cua-windows-544dbac-20260930]
+    branches: [validation/cua-canonical-544dbac-20261001]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: opengeni-cua-windows-544dbac
+  group: opengeni-cua-canonical-544dbac2f30cc02cbd755a03774c4420fd5c9259
   cancel-in-progress: false
 
+# The validation wrapper never changes the candidate or selects diagnostic cells.
+# Reuse the candidate's complete canonical release suites, including their
+# exact-source checks, isolated desktop preflight and typed video evidence.
 jobs:
-  controller:
-    name: Frozen OpenGeni controller and repaired CUA
-    runs-on: windows-latest
-    timeout-minutes: 45
-    env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-      CUA_DRIVER_SOURCE_SHA: 544dbac2f30cc02cbd755a03774c4420fd5c9259
-      OPENGENI_SOURCE_SHA: e789c63712ec3f5554c5fa865cf98143e26f2cef
-      CUA_DRIVER_RS_TELEMETRY_ENABLED: "false"
-    defaults:
-      run:
-        shell: pwsh
-        working-directory: libs/cua-driver/rust
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: 544dbac2f30cc02cbd755a03774c4420fd5c9259
-          persist-credentials: false
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          path: opengeni-validation
-          sparse-checkout: validation
-          persist-credentials: false
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          repository: Cloudgeni-ai/opengeni
-          ref: e789c63712ec3f5554c5fa865cf98143e26f2cef
-          path: opengeni
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: 1.4.0
-      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
-        with:
-          toolchain: 1.97.1
-      - name: Verify frozen public sources and isolated desktop
-        run: |
-          $actual = (git rev-parse HEAD).Trim()
-          if ($actual -ne $env:CUA_DRIVER_SOURCE_SHA) { throw "Unexpected CUA source revision" }
-          $opengeniRoot = Join-Path $env:GITHUB_WORKSPACE "opengeni"
-          $opengeniSha = (git -C $opengeniRoot rev-parse HEAD).Trim()
-          if ($opengeniSha -ne $env:OPENGENI_SOURCE_SHA) { throw "Unexpected OpenGeni source revision" }
-          $sessionId = (Get-Process -Id $PID).SessionId
-          if ($sessionId -eq 0) { throw "Requires interactive desktop" }
-          & "$env:GITHUB_WORKSPACE\scripts\ci\windows\verify-user-session.ps1"
-          $overlay = "$env:GITHUB_WORKSPACE\opengeni-validation\validation\windows-opengeni-controller.ts"
-          Copy-Item $overlay "$opengeniRoot\packages\browserd\test\og-windows-cua-probe.ts"
-          git diff --exit-code -- .
-          if ($LASTEXITCODE -ne 0) { throw "Experiment changed tracked source" }
-          git -C $opengeniRoot diff --exit-code -- .
-          if ($LASTEXITCODE -ne 0) { throw "Experiment changed tracked OpenGeni source" }
-          $changes = @(git -C $opengeniRoot ls-files --others --exclude-standard -- .)
-          if ($changes.Count -ne 1 -or $changes[0] -ne "packages/browserd/test/og-windows-cua-probe.ts") {
-            throw "Unexpected experiment source: $changes"
-          }
-          $artifacts = Join-Path $env:RUNNER_TEMP "opengeni-cua-controller"
-          New-Item -ItemType Directory -Force $artifacts | Out-Null
-          @{
-            sourceSha = $actual
-            opengeniSha = $opengeniSha
-            validationSha = $env:GITHUB_SHA
-            testSha256 = (Get-FileHash $overlay -Algorithm SHA256).Hash
-            windowsSession = $sessionId
-            transport = "native MCP envelope projected through test-only DesktopRuntime"
-            productionWindowsEnabled = $false
-            packagedWindowsSdkAccepted = $false
-          } | ConvertTo-Json | Set-Content (Join-Path $artifacts "source-proof.json")
-          "CUA: $actual; OpenGeni: $opengeniSha; Windows session: $sessionId"
-      - name: Build source driver and required WPF fixture
-        run: |
-          cargo build -p cua-driver --bin cua-driver --locked
-          if ($LASTEXITCODE -ne 0) { throw "Source-built driver failed" }
-          & "$env:GITHUB_WORKSPACE\libs\cua-driver\tests\fixtures\build\windows.ps1" -Targets wpf
-          if ($LASTEXITCODE -ne 0) { throw "WPF fixture failed to build" }
-          if (-not (Test-Path "test-apps\harness-wpf\CuaTestHarness.Wpf.exe")) { throw "Required WPF fixture absent" }
-          $binary = Join-Path (Get-Location) "target\debug\cua-driver.exe"
-          (Get-FileHash $binary -Algorithm SHA256).Hash | Set-Content (Join-Path $env:RUNNER_TEMP "opengeni-cua-controller\driver-sha256.txt")
-      - name: Install exact OpenGeni dependencies
-        working-directory: opengeni
-        run: |
-          bun install --frozen-lockfile --ignore-scripts
-          if ($LASTEXITCODE -ne 0) { throw "Frozen OpenGeni dependencies failed" }
-          git diff --exit-code -- .
-          if ($LASTEXITCODE -ne 0) { throw "Install modified frozen OpenGeni source" }
-      - name: Exercise actual controller receipts and live previews
-        run: |
-          $env:OG_CUA_DRIVER = Join-Path (Get-Location) "target\debug\cua-driver.exe"
-          $env:OG_CUA_FIXTURE = Join-Path (Get-Location) "test-apps\harness-wpf\CuaTestHarness.Wpf.exe"
-          $env:OG_CUA_EVIDENCE = Join-Path $env:RUNNER_TEMP "opengeni-cua-controller"
-          $probe = Join-Path $env:GITHUB_WORKSPACE "opengeni\packages\browserd\test\og-windows-cua-probe.ts"
-          bun --no-env-file $probe 2>&1 | Tee-Object -FilePath (Join-Path $env:OG_CUA_EVIDENCE "experiment.log")
-          if ($LASTEXITCODE -ne 0) { throw "Real OpenGeni Windows controller experiment failed" }
-          git diff --exit-code -- .
-          if ($LASTEXITCODE -ne 0) { throw "Experiment changed native source" }
-          git -C "$env:GITHUB_WORKSPACE\opengeni" diff --exit-code -- .
-          if ($LASTEXITCODE -ne 0) { throw "Experiment changed OpenGeni source" }
-      - name: Retain public fixture evidence
-        if: always()
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
-        with:
-          name: frozen-opengeni-cua-windows-controller
-          path: ${{ runner.temp }}/opengeni-cua-controller
-          if-no-files-found: error
-          retention-days: 7
+  linux:
+    uses: jorgensandhaug/cua/.github/workflows/e2e-rust-linux.yml@544dbac2f30cc02cbd755a03774c4420fd5c9259
+    with:
+      ref: 544dbac2f30cc02cbd755a03774c4420fd5c9259
+      lane: all
+      cell_filter: ""
+  windows:
+    uses: jorgensandhaug/cua/.github/workflows/e2e-rust-windows.yml@544dbac2f30cc02cbd755a03774c4420fd5c9259
+    with:
+      ref: 544dbac2f30cc02cbd755a03774c4420fd5c9259
+      lane: all
+      runner: windows-latest
