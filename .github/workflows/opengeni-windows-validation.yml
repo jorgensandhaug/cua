@@ -1,0 +1,49 @@
+name: Frozen CUA macOS hosted environment probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cua-macos-probe-544dbac2f30cc02cbd755a03774c4420fd5c9259
+  cancel-in-progress: false
+
+# This prerequisite probe does not certify the desktop matrix. The candidate's
+# native implementation, fixtures and preflight remain byte-for-byte unchanged.
+jobs:
+  probe:
+    name: Canonical hosted GUI prerequisite
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      CUA_E2E_SOURCE_SHA: ${{ github.sha }}
+      CUA_E2E_WORKFLOW_SHA: ${{ github.sha }}
+      CUA_MACOS_HOSTED_PROBE_DIR: ${{ runner.temp }}/cua-macos-hosted-probe
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify frozen candidate and clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "${CUA_E2E_SOURCE_SHA}" ]]
+          [[ -z "$(git status --porcelain --untracked-files=normal)" ]]
+          git diff --exit-code 544dbac2f30cc02cbd755a03774c4420fd5c9259 HEAD -- . \
+            ':!.github/workflows/opengeni-windows-validation.yml'
+      - name: Run unchanged hosted environment probe
+        shell: bash
+        run: scripts/ci/macos/probe-hosted-runner.sh
+      - name: Retain synthetic environment evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: cua-macos-hosted-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cua-macos-hosted-probe
+          if-no-files-found: error
+          retention-days: 7
