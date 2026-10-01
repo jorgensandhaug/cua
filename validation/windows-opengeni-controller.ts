@@ -200,6 +200,33 @@ try {
   };
   supervisor = await ComputerSupervisor.open({
     rootDirectory: join(evidence, "controller"),
+    // The frozen default allocator supports native Mac/Linux seats. This
+    // runner already owns an interactive Windows desktop, verified before
+    // fixture launch; supply it through the existing allocator seam rather
+    // than changing production platform admission to make an experiment pass.
+    environmentAllocator: {
+      allocate: async (context) => {
+        const proof = await Bun.file(join(evidence, "source-proof.json")).json();
+        assert.ok(Number.isInteger(proof.windowsSession) && proof.windowsSession > 0);
+        await record("owned-windows-environment", {
+          windowsSession: proof.windowsSession,
+          productionAllocatorChanged: false,
+          rfbPort: null,
+        });
+        return {
+          seatId: `windows-ci:${proof.windowsSession}`,
+          displayId: `windows-ci:${proof.windowsSession}`,
+          rfbPort: null,
+          environment: context.baseEnvironment,
+          close: async () => {
+            await record("owned-windows-environment-released", {
+              windowsSession: proof.windowsSession,
+              physicalDesktopTerminated: false,
+            });
+          },
+        };
+      },
+    },
     createDriver: async (context) =>
       new ComputerDriver({
         computerSessionId: context.computerSessionId,
