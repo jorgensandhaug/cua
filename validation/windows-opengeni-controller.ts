@@ -124,6 +124,36 @@ class NativeMcpRuntime {
         );
       }
     }
+    if (name === "get_window_state" && args.include_screenshot) {
+      const images = (result.content ?? []).filter((item: any) => item.type === "image");
+      await record("native-windows-capture-envelope", {
+        pid: data.pid,
+        windowId: data.window_id,
+        captureIdPresent: typeof data.capture_id === "string",
+        width: data.screenshot_width,
+        height: data.screenshot_height,
+        nativeFrameValidity: data.screenshot_frame_valid ?? null,
+        screenshotError: data.screenshot_error ?? null,
+        imageCount: images.length,
+      });
+      // Windows does not emit the Mac-only screenshot_frame_valid flag.
+      // Project validity only after checking the native capture identity,
+      // publication and its actual PNG bytes; never invent a capture ID.
+      assert.notEqual(result.isError, true);
+      assert.equal(data.pid, args.pid);
+      assert.equal(data.window_id, args.window_id);
+      assert.ok(typeof data.capture_id === "string" && data.capture_id.length > 0);
+      assert.equal(data.screenshot_error, undefined);
+      assert.equal(images.length, 1);
+      assert.equal(images[0].mimeType, "image/png");
+      const png = Buffer.from(images[0].data, "base64");
+      assert.ok(png.length >= 24);
+      assert.equal(png.readUInt32BE(0), 0x89504e47);
+      assert.equal(png.readUInt32BE(16), data.screenshot_width);
+      assert.equal(png.readUInt32BE(20), data.screenshot_height);
+      assert.ok(data.screenshot_width > 0 && data.screenshot_height > 0);
+      data.screenshot_frame_valid = true;
+    }
     if (["click", "set_value", "press_key", "type_text", "drag", "scroll"].includes(name)) {
       await record("native-" + name, { args, isError: result.isError === true, data });
     }
